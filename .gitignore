@@ -1,0 +1,19 @@
+# Standard C
+*.o
+*.def.h
+
+# Specific
+*.png
+dmenu*
+stest
+*.tar
+tags
+
+# VM analysis
+*-an*
+*.vim
+*-debug*
+print
+
+# Workflow
+.vscode/

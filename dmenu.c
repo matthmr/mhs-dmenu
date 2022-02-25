@@ -779,6 +779,7 @@ insert: {
 			while (next && (curr = curr->right))
 				calcoffsets();
 		}
+		chosen = SELF (out_of);
 		sel = matchend;
 		break;
 	case XK_Escape:
@@ -790,7 +791,7 @@ insert: {
 			cursor = 0;
 			break;
 		}
-		chosen = (out_of)? 1: 0;
+		chosen = ONE (out_of);
 		sel = curr = matches;
 		calcoffsets();
 		break;

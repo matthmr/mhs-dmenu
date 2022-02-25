@@ -1,4 +1,5 @@
 /* See LICENSE file for copyright and license details. */
+#include <math.h>
 #include <ctype.h>
 #include <locale.h>
 #include <stdio.h>
@@ -27,6 +28,12 @@
 #define NUMBERSMAXDIGITS      100
 #define NUMBERSBUFSIZE        (NUMBERSMAXDIGITS * 2) + 1
 
+#define ONE(X)            (X)? 1: 0;
+#define SELF(X)           (X)? (X): 0;
+
+#define UNDERFLOW 0
+#define OVERFLOW 1
+
 /* enums */
 // enum { SchemeNorm, SchemeSel, SchemeOut, SchemeLast }; * color schemes *
 enum { SchemeNorm, SchemeSel, SchemeNormHighlight, SchemeSelHighlight,
@@ -37,6 +44,7 @@ struct item {
 	char *text;
 	struct item *left, *right;
 	int out;
+	double distance; // fuzzy finding
 };
 
 static char numbers[NUMBERSBUFSIZE] = "";
@@ -71,7 +79,91 @@ static char *(*fstrstr)(const char *, const char *) = cistrstr;
 // -- CHANGE -- //
 static void drawmenu (void);
 static void insert (const char*, ssize_t);
+static void appenditem (struct item*, struct item**, struct item**);
+static void calcoffsets (void);
 // -- CHANGE -- //
+
+int
+compare_distance(const void *a, const void *b)
+{
+	struct item *da = *(struct item **) a;
+	struct item *db = *(struct item **) b;
+
+	if (!db)
+		return 1;
+	if (!da)
+		return -1;
+
+	return da->distance == db->distance ? 0 : da->distance < db->distance ? -1 : 1;
+}
+
+void
+fuzzymatch(void)
+{
+	/* bang - we have so much memory */
+	struct item *it;
+	struct item **fuzzymatches = NULL;
+	char c;
+	int number_of_matches = 0, i, pidx, sidx, eidx;
+	int text_len = strlen(text), itext_len;
+
+	matches = matchend = NULL;
+
+	/* walk through all items */
+	for (it = items; it && it->text; it++) {
+		if (text_len) {
+			itext_len = strlen(it->text);
+			pidx = 0; /* pointer */
+			sidx = eidx = -1; /* start of match, end of match */
+			/* walk through item text */
+			for (i = 0; i < itext_len && (c = it->text[i]); i++) {
+				/* fuzzy match pattern */
+				if (!fstrncmp(&text[pidx], &c, 1)) {
+					if(sidx == -1)
+						sidx = i;
+					pidx++;
+					if (pidx == text_len) {
+						eidx = i;
+						break;
+					}
+				}
+			}
+			/* build list of matches */
+			if (eidx != -1) {
+				/* compute distance */
+				/* add penalty if match starts late (log(sidx+2))
+				 * add penalty for long a match without many matching characters */
+				it->distance = log(sidx + 2) + (double)(eidx - sidx - text_len);
+				/* fprintf(stderr, "distance %s %f\n", it->text, it->distance); */
+				appenditem(it, &matches, &matchend);
+				number_of_matches++;
+			}
+		} else {
+			appenditem(it, &matches, &matchend);
+		}
+	}
+
+	if (number_of_matches) {
+		/* initialize array with matches */
+		if (!(fuzzymatches = realloc(fuzzymatches, number_of_matches * sizeof(struct item*))))
+			die("cannot realloc %u bytes:", number_of_matches * sizeof(struct item*));
+		for (i = 0, it = matches; it && i < number_of_matches; i++, it = it->right) {
+			fuzzymatches[i] = it;
+		}
+		/* sort matches according to distance */
+		qsort(fuzzymatches, number_of_matches, sizeof(struct item*), compare_distance);
+		/* rebuild list of matches */
+		matches = matchend = NULL;
+		for (i = 0, it = fuzzymatches[i];  i < number_of_matches && it && \
+				it->text; i++, it = fuzzymatches[i]) {
+			appenditem(it, &matches, &matchend);
+		}
+		free(fuzzymatches);
+	}
+	curr = sel = matches;
+	calcoffsets();
+}
+
 
 static void
 appenditem(struct item *item, struct item **list, struct item **last)
@@ -110,7 +202,7 @@ max_textw(void)
 	int len = 0;
 	for (struct item *item = items; item && item->text; item++)
 		len = MAX(TEXTW(item->text), len);
-	return len;
+	return len > 100? 100: len;
 }
 
 static void
@@ -308,50 +400,68 @@ drawitem(struct item *item, int x, int y, int w)
 		drw_setscheme(drw, scheme[SchemeNorm]);
 
 	// return drw_text(drw, x, y, w, bh, lrpad / 2, item->text, 0);
- 	r = drw_text(drw, x, y, w, bh, lrpad / 2, item->text, 0);
- 	drawhighlights(item, x, y, w);
- 	return r;
+	r = drw_text(drw, x, y, w, bh, lrpad / 2, item->text, 0);
+	drawhighlights(item, x, y, w);
+	return r;
 }
 
-static void
-qupdatenum(void) {
-	static unsigned int _denom;
-	if ((denom != _denom) && _denom) {
-		numer = (denom)? 1: 0;
-		return;
+static char
+updateitem(int n)
+{
+
+	if ((chosen + n) <= 0) { // underflow -- END
+		chosen = SELF (out_of);
+		if (next) {
+			curr = matchend;
+			calcoffsets();
+			curr = prev;
+			calcoffsets();
+			while (next && (curr = curr->right))
+				calcoffsets();
+		}
+		sel = matchend;
+		return UNDERFLOW;
+	}
+	else if ((chosen + n) > out_of) { // overflow -- HOME
+		chosen = ONE (out_of);
+		sel = curr = matches;
+		calcoffsets();
+		return OVERFLOW;
+	}
+	else if (out_of) {
+		chosen += n;
+	}
+	else {
+		chosen = 0;
 	}
 
-	_denom = denom;
+	snprintf(numbers, NUMBERSBUFSIZE, "%d/%d", chosen, out_of);
+	return 2;
 }
 
 static void
-updatenum(int n)
-{
-	qupdatenum ();
-
-	if (numer + n <= 0 || numer + n > denom) // over- and underflow
-		numer = (numer + n <= 0)? denom: 1;
-	else numer += n;
-
-	snprintf(numbers, NUMBERSBUFSIZE, "%d/%d", numer, denom);
-}
-
-static void
-recalculatenumbers()
+bound(void)
 {
 
-	unsigned int _denom = 0;
+	unsigned int _out_of = 0;
 
 	struct item *item;
 	if (matchend) {
-		_denom++;
+		_out_of++;
 		for (item = matchend; item && item->left; item = item->left)
-			_denom++;
+			_out_of++;
 	}
-	/*for (item = items; item && item->text; item++)
-		_denom++;*/
+	else for (item = items; item && item->text; item++)
+		_out_of++;
 
-	snprintf(numbers, NUMBERSBUFSIZE, "%d/%d", numer, denom = _denom);
+	out_of = _out_of;
+
+	if (out_of != out_ofcp) {
+		chosen = ONE (out_of);
+		out_ofcp = out_of;
+	}
+
+	snprintf(numbers, NUMBERSBUFSIZE, "%d/%d", chosen, out_of);
 }
 
 
@@ -380,7 +490,7 @@ drawmenu(void)
 		drw_rect(drw, x + curpos, 2, 2, bh - 4, 1, 0);
 	}
 
-	recalculatenumbers();
+	bound();
 	if (lines > 0) {
 		/* draw vertical list */
 		for (item = curr; item != next; item = item->right)
@@ -448,6 +558,9 @@ grabkeyboard(void)
 static void
 match(void)
 {
+
+	fuzzymatch();
+
 	static char **tokv = NULL;
 	static int tokn = 0;
 
@@ -621,10 +734,10 @@ keypress(XKeyEvent *ev)
 			goto draw;
 		case XK_g: ksym = XK_Home;  break;
 		case XK_G: ksym = XK_End;   break;
-		case XK_h: ksym = XK_Up;    break;
-		case XK_j: ksym = XK_Next;  break;
-		case XK_k: ksym = XK_Prior; break;
-		case XK_l: ksym = XK_Down;  break;
+		case XK_k: ksym = XK_Up;    break;
+		case XK_l: ksym = XK_Next;  break;
+		case XK_h: ksym = XK_Prior; break;
+		case XK_j: ksym = XK_Down;  break;
 		default:
 			return;
 		}
@@ -640,13 +753,13 @@ insert: {
 		break;
 	case XK_Delete:
 	case XK_KP_Delete:
-		numer = 1;
+		chosen = 1;
 		if (text[cursor] == '\0')
 			return;
 		cursor = nextrune(+1);
 		/* fallthrough */
 	case XK_BackSpace:
-		numer = 1;
+		chosen = 1;
 		if (cursor == 0)
 			return;
 		insert(NULL, nextrune(-1) - cursor);
@@ -677,6 +790,7 @@ insert: {
 			cursor = 0;
 			break;
 		}
+		chosen = (out_of)? 1: 0;
 		sel = curr = matches;
 		calcoffsets();
 		break;
@@ -691,29 +805,22 @@ insert: {
 		/* fallthrough */
 	case XK_Up:
 	case XK_KP_Up:
-		updatenum(-1);
-
-		if (underflow) {
-			underflow = 0;
-			curr = matchend;
-			calcoffsets();
-			sel = matchend;
+		if (updateitem(-1) == UNDERFLOW)
 			break;
-		}
 
-		else if (sel && sel->left && (sel = sel->left)->right == curr) {
+		if (sel && sel->left && (sel = sel->left)->right == curr) {
 			curr = prev;
 			calcoffsets();
+			break;
 		}
-
-		else if (((numer == 1) || !numer) && !underflow)
-			underflow = 1;
 
 		break;
 	case XK_Next:
 	case XK_KP_Next:
 		if (!next)
 			return;
+		chosen -= (chosen == 1)? 0: ((chosen % lines) - 1);
+		chosen += lines;
 		sel = curr = next;
 		calcoffsets();
 		break;
@@ -721,6 +828,8 @@ insert: {
 	case XK_KP_Prior:
 		if (!prev)
 			return;
+		chosen -= (chosen <= lines)? (chosen - lines - 1): (chosen - 1) % lines;
+		chosen -= lines;
 		sel = curr = prev;
 		calcoffsets();
 		break;
@@ -745,22 +854,14 @@ insert: {
 		/* fallthrough */
 	case XK_Down:
 	case XK_KP_Down:
-		updatenum(+1);
+		if (updateitem(+1) == OVERFLOW)
+			break;
 
-		if (overflow) {
-			overflow = 0;
-			sel = curr = matches;
-			calcoffsets();
-		}
-
-		else if (sel && sel->right && (sel = sel->right) == next) {
+		if (sel && sel->right && (sel = sel->right) == next) {
 			curr = next;
 			calcoffsets();
 			break;
 		}
-
-		else if ((numer == denom) && !overflow)
-			overflow = 1;
 
 		break;
 	case XK_Tab:
@@ -773,8 +874,10 @@ insert: {
 		break;
 	}
 
-draw:
+draw: {
 	drawmenu();
+	// resetitem();
+}
 }
 
 static void
@@ -838,9 +941,9 @@ run(void)
 				break;
 			cleanup();
 			exit(1);
- 		case ButtonPress:
- 			buttonpress(&ev);
- 			break;
+		case ButtonPress:
+			buttonpress(&ev);
+			break;
 		case Expose:
 			if (ev.xexpose.count == 0)
 				drw_map(drw, win, 0, 0, mw, mh);

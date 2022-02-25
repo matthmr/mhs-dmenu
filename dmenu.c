@@ -451,8 +451,7 @@ bound(void)
 		for (item = matchend; item && item->left; item = item->left)
 			_out_of++;
 	}
-	else for (item = items; item && item->text; item++)
-		_out_of++;
+	else _out_of = 0;
 
 	out_of = _out_of;
 

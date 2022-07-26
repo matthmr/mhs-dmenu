@@ -1,13 +1,18 @@
 #!/bin/sh
 
-cachedir="${XDG_CACHE_HOME:-"$HOME/.cache"}"
+case $1 in
+	'-h'|'--help')
+		echo "Usage:       dmenu-gencache.sh"
+		echo "Description: Generate \`dmenu' cache"
+		exit 1
+esac
+
+cachedir="/home/mh/.cache/"
 cache="$cachedir/dmenu_run"
 
 [ ! -e "$cachedir" ] && mkdir -p "$cachedir"
 
 IFS=:
-if stest -dqr -n "$cache" $PATH; then
-	stest -flx $PATH | sort -u | tee "$cache"
-else
-	cat "$cache"
+if /mnt/ssd/root/usr/bin/stest -dqr -n "$cache" $PATH; then
+	/mnt/ssd/root/usr/bin/stest -flx $PATH | sort -u | tee "$cache" >/dev/null
 fi
